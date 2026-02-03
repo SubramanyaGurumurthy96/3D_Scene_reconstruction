@@ -1,13 +1,10 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
-import torch
-import torch.nn as nn
-from einops import rearrange
-from .camera import PluckerEncoder
-from .gaussian_head import GaussianHead
-from .plucker import plucker_embedding
-from .model import Patchify2x2, Unpatchify2x2  # if split files adjust imports
+
+from scene_reconstruction.camera import PluckerEncoder
+from scene_reconstruction.gaussian_head import GaussianHead
+from scene_reconstruction.plucker import plucker_embedding
 
 
 
