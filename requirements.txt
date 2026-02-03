@@ -1,0 +1,7 @@
+torch
+torchvision
+einops
+lpips
+numpy
+opencv-python
+scipy>=1.13.0
