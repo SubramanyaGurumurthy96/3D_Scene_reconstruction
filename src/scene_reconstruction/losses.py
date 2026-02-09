@@ -14,7 +14,7 @@ def scale_invariant_depth_loss(pred, gt, mask=None, eps=1e-6):
     return d.pow(2).mean() - d.mean().pow(2)
 
 def compute_losses(render_rgb, teacher_rgb, render_depth, teacher_depth, opacity,
-                   use_lpips=True, use_depth=True):
+                   use_lpips=False, use_depth=True):
     # Align teacher resolution to render resolution if needed
     if teacher_rgb.shape != render_rgb.shape:
         import torch.nn.functional as F
