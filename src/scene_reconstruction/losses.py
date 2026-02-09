@@ -37,9 +37,10 @@ def compute_losses(render_rgb, teacher_rgb, render_depth, teacher_depth, opacity
     if use_depth and teacher_depth is not None:
         Ld = scale_invariant_depth_loss(render_depth, teacher_depth)
 
-    Lop = opacity.abs().mean()
+    Lop = (opacity - 1.0).abs().mean()
 
-    loss = 1.0 * Lmse + 0.5 * Llp + 0.05 * Ld + 0.1 * Lop  # :contentReference[oaicite:29]{index=29}
+    loss = Lmse + (0.5 * Llp if use_lpips else 0.0) + (0.05 * Ld if use_depth else 0.0)
+
     return loss, {
         "mse": Lmse.item(),
         "lpips": float(Llp.item()),
