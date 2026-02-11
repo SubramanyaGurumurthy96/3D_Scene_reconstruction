@@ -62,7 +62,7 @@ def compute_losses(
     if use_lpips:
         loss = loss + 0.5 * Llp
     if use_depth:
-        loss = loss + 0.05 * Ld
+        loss = loss + 0.005 * Ld
 
     return loss, {
         "mse": Lmse.item(),
