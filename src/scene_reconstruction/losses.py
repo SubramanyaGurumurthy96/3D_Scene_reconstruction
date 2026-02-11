@@ -24,12 +24,6 @@ def compute_losses(
 ):
     global _lpips
 
-    print("use_depth flag:", use_depth)
-
-    print("render_depth mean:", render_depth.mean().item())
-    print("teacher_depth mean:", teacher_depth.mean().item())
-
-
     # Resize teacher to match render resolution
     if teacher_rgb.shape != render_rgb.shape:
         teacher_rgb = F.interpolate(
