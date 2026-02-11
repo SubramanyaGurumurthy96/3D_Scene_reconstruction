@@ -122,11 +122,6 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
             print("depth_valid:", depth_valid)
             print("args.no_depth:", args.no_depth)
 
-        if state.step == 0:
-            print("depth_pred mean:", depth_pred.mean().item())
-
-
-
         device_type = "cuda" if torch.cuda.is_available() else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=args.amp):
             gauss = model(z, Ks, Rs, ts)
@@ -154,6 +149,9 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
                             use_depth=(teacher_depth is not None),
                             # use_depth=True,
                         )
+
+                        if state.step == 0:
+                            print("depth_pred mean:", depth_pred.mean().item())
                         loss_total = loss_total + loss
 
             loss_total = loss_total / max(1, B * V * L)
