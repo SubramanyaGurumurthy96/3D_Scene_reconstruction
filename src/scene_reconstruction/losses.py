@@ -19,7 +19,7 @@ def compute_losses(
     render_depth,
     teacher_depth,
     opacity,
-    use_lpips=False,
+    use_lpips=True,
     use_depth=True,
 ):
     global _lpips
@@ -62,7 +62,7 @@ def compute_losses(
     if use_lpips:
         loss = loss + 0.5 * Llp
     if use_depth:
-        loss = loss + 0.005 * Ld
+        loss = loss + 0.05 * Ld
 
     return loss, {
         "mse": Lmse.item(),

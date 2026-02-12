@@ -93,12 +93,6 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
         ts = batch["t"].to(device)
         teacher_rgb = batch["rgb"].to(device)
         teacher_depth = batch["depth"].to(device)
-        if state.step == 0:
-            print("teacher_depth is None:", teacher_depth is None)
-            if teacher_depth is not None:
-                print("teacher_depth shape:", teacher_depth.shape)
-                print("teacher_depth mean:", teacher_depth.float().mean().item())
-
         depth_valid = batch.get("depth_valid", True)
         if torch.is_tensor(depth_valid):
             if depth_valid.numel() == 1:
@@ -115,12 +109,11 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
         if state.step % accum == 0:
             optim.zero_grad(set_to_none=True)
 
+
         if state.step == 0:
             print("depth_valid:", depth_valid)
-            print("teacher_depth is None:", teacher_depth is None)
-            print("teacher_depth shape:", None if teacher_depth is None else teacher_depth.shape)
-            print("depth_valid:", depth_valid)
             print("args.no_depth:", args.no_depth)
+
 
         device_type = "cuda" if torch.cuda.is_available() else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=args.amp):
@@ -146,12 +139,9 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
                             teacher_depth[b, v, t] if depth_valid else None,
                             gauss["opacity"][b, v, t],
                             use_lpips=args.use_lpips,
-                            use_depth=(teacher_depth is not None),
-                            # use_depth=True,
+                            # use_depth=depth_valid and (not args.no_depth),
+                            use_depth=True,
                         )
-
-                        if state.step == 0:
-                            print("depth_pred mean:", depth_pred.mean().item())
                         loss_total = loss_total + loss
 
             loss_total = loss_total / max(1, B * V * L)
@@ -238,7 +228,7 @@ def parse_args():
     )
     p.add_argument("--data-format", default="auto", choices=["auto", "teacher", "demo"])
     p.add_argument("--no-depth", action="store_true")
-    p.add_argument("--lpips", dest="use_lpips", action="store_true", default=False)
+    p.add_argument("--lpips", dest="use_lpips", action="store_true", default=True)
 
     return p.parse_args()
 
