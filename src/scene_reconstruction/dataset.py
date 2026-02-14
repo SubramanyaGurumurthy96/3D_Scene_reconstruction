@@ -240,6 +240,7 @@ class LyraDiffusionOutputDataset(Dataset):
 
 
         # ----- Depth (read EXR from ZIP) -----
+        # ----- Depth (read EXR from ZIP safely) -----
         depth_valid = False
         depth = None
 
@@ -250,21 +251,24 @@ class LyraDiffusionOutputDataset(Dataset):
                 depth_list = []
 
                 try:
-                    with zipfile.ZipFile(zip_path, 'r') as z:
+                    import zipfile
+                    import io
+
+                    with zipfile.ZipFile(zip_path, "r") as zip_f:
+                        names = set(zip_f.namelist())
 
                         for frame_idx in range(self.L or rgb.shape[1]):
                             exr_name = f"{frame_idx:05d}.exr"
 
-                            if exr_name not in z.namelist():
+                            if exr_name not in names:
                                 break
 
-                            exr_bytes = z.read(exr_name)
+                            exr_bytes = zip_f.read(exr_name)
 
-                            exr_file = OpenEXR.InputFile(
-                                io.BytesIO(exr_bytes)
-                            )
-
+                            # Load EXR from memory
+                            exr_file = OpenEXR.InputFile(io.BytesIO(exr_bytes))
                             header = exr_file.header()
+
                             dw = header["dataWindow"]
                             width = dw.max.x - dw.min.x + 1
                             height = dw.max.y - dw.min.y + 1
@@ -285,9 +289,9 @@ class LyraDiffusionOutputDataset(Dataset):
                             depth_list.append(depth_np)
 
                     if len(depth_list) > 0:
-                        depth_np = np.stack(depth_list, axis=0)
+                        depth_np = np.stack(depth_list, axis=0)  # [L,H,W]
                         depth = torch.from_numpy(depth_np).float()
-                        depth = depth.unsqueeze(1).unsqueeze(0)
+                        depth = depth.unsqueeze(1).unsqueeze(0)  # [1,L,1,H,W]
                         depth_valid = True
 
                 except Exception as e:
@@ -295,6 +299,7 @@ class LyraDiffusionOutputDataset(Dataset):
 
         if depth is None:
             depth = torch.zeros((1, rgb.shape[1], 1, tgt_h, tgt_w), dtype=torch.float32)
+
 
 
         # ----- Latent Shape Fix -----
