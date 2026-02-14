@@ -38,6 +38,33 @@ for f in dataset_part033{4..8}.tar; do
 done
 
 
+# for f in *.zip; do
+#     name="${f%.zip}"
+#     mkdir -p "$name"
+#     unzip -q "$f" -d "$name"
+# done
+
+
+# unzip depth zip
+python3 - << 'EOF'
+import os
+import zipfile
+
+root = "/workspace/3D_Scene_reconstruction/script/lyra_dataset/static"
+
+for root_dir, _, files in os.walk(root):
+    for f in files:
+        if f.endswith(".zip"):
+            zip_path = os.path.join(root_dir, f)
+            print("Extracting", zip_path)
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(root_dir)
+
+print("Done extracting.")
+EOF
+
+
+
 python train_minilyra.py \
   --data-root /workspace/3D_Scene_reconstruction/script/lyra_dataset/static \
   --data-format demo \
