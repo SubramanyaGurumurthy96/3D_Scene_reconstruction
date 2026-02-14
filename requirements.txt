@@ -6,3 +6,4 @@ numpy
 opencv-python
 scipy>=1.13.0
 gsplat
+openexr

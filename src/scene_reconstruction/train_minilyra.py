@@ -44,7 +44,7 @@ def build_renderer(backend: str):
         from scene_reconstruction.renderer import ImageProxyRenderer
         return ImageProxyRenderer()
     # Otherwise assume a real 3DGS backend identifier (e.g., "gsplat", "diff-gaussian-rasterization")
-    return GaussianRenderer(backend)
+    return GaussianRenderer()
 
 
 # -------------------------
@@ -157,7 +157,7 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
                         # - only if user didn't disable depth
                         # - only if depth_pred exists (should for image and real 3DGS)
                         use_depth = depth_valid and (not args.no_depth) and (depth_pred is not None)
-
+                        use_depth = True    
                         # teacher_depth slice (shape [1,H,W] ideally)
                         td = teacher_depth[b, v, t] if use_depth else None
 
