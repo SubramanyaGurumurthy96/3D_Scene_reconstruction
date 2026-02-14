@@ -24,41 +24,49 @@ def seed_all(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+# -------------------------
+# Renderers
+# -------------------------
+
+class DummyRenderer:
+    """Debug-only renderer so the loop runs without a 3DGS backend."""
+    def render(self, gauss, K, R, t, H, W):
+        device = next(iter(gauss.values())).device
+        rgb = torch.zeros(3, H, W, device=device)
+        depth = torch.zeros(1, H, W, device=device)
+        return rgb, depth
+
+
 def build_renderer(backend: str):
     if backend == "dummy":
         return DummyRenderer()
     if backend == "image":
         from scene_reconstruction.renderer import ImageProxyRenderer
         return ImageProxyRenderer()
+    # Otherwise assume a real 3DGS backend identifier (e.g., "gsplat", "diff-gaussian-rasterization")
     return GaussianRenderer(backend)
 
 
-class DummyRenderer:
-    """
-    Debug-only renderer so the loop runs without a 3DGS backend.
-    Returns zeros with the right shape.
-    """
-
-    def render(self, gauss, K, R, t, H, W):
-        device = gauss["pos"].device
-        rgb = torch.zeros(3, H, W, device=device)
-        depth = torch.zeros(1, H, W, device=device)
-        return rgb, depth
-
+# -------------------------
+# Checkpointing (safer)
+# -------------------------
 
 def save_ckpt(path, model, optim, scaler, state: TrainState):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optim": optim.state_dict(),
-            "scaler": scaler.state_dict() if scaler is not None else None,
-            "epoch": state.epoch,
-            "step": state.step,
-            "best_loss": state.best_loss,
-        },
-        path,
-    )
+    tmp_path = path + ".tmp"
+
+    payload = {
+        "model": model.state_dict(),
+        "optim": optim.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+        "epoch": state.epoch,
+        "step": state.step,
+        "best_loss": state.best_loss,
+    }
+
+    # Atomic-ish save to avoid corrupted ckpt on disk-full / interruption
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def load_ckpt(path, model, optim, scaler):
@@ -68,10 +76,22 @@ def load_ckpt(path, model, optim, scaler):
     if scaler is not None and ckpt.get("scaler") is not None:
         scaler.load_state_dict(ckpt["scaler"])
     return TrainState(
-        epoch=ckpt.get("epoch", 0),
-        step=ckpt.get("step", 0),
-        best_loss=ckpt.get("best_loss", float("inf")),
+        epoch=int(ckpt.get("epoch", 0)),
+        step=int(ckpt.get("step", 0)),
+        best_loss=float(ckpt.get("best_loss", float("inf"))),
     )
+
+
+# -------------------------
+# Training
+# -------------------------
+
+def _as_bool_depth_valid(depth_valid):
+    if torch.is_tensor(depth_valid):
+        if depth_valid.numel() == 1:
+            return bool(depth_valid.item())
+        return bool(depth_valid.all().item())
+    return bool(depth_valid)
 
 
 def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state: TrainState):
@@ -80,27 +100,21 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
     running_loss = 0.0
     running_steps = 0
 
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+
     for batch in loader:
         z = batch["z"]
         if z is None:
-            raise RuntimeError(
-                "Missing latents. Provide latents.npz with key 'z' or add an encoder."
-            )
+            raise RuntimeError("Missing latents. Provide latents or add an encoder.")
 
         z = z.to(device)  # [B,V,L,C,h,w]
         Ks = batch["K"].to(device)
         Rs = batch["R"].to(device)
         ts = batch["t"].to(device)
-        teacher_rgb = batch["rgb"].to(device)
-        teacher_depth = batch["depth"].to(device)
-        depth_valid = batch.get("depth_valid", True)
-        if torch.is_tensor(depth_valid):
-            if depth_valid.numel() == 1:
-                depth_valid = bool(depth_valid.item())
-            else:
-                depth_valid = bool(depth_valid.all().item())
-        else:
-            depth_valid = bool(depth_valid)
+
+        teacher_rgb = batch["rgb"].to(device)      # [B,V,L,3,H,W]
+        teacher_depth = batch["depth"].to(device)  # [B,V,L,1,H,W] or zeros
+        depth_valid = _as_bool_depth_valid(batch.get("depth_valid", True))
 
         B, V, L = z.shape[:3]
         H = teacher_rgb.shape[-2]
@@ -109,29 +123,44 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
         if state.step % accum == 0:
             optim.zero_grad(set_to_none=True)
 
-
         if state.step == 0:
             print("depth_valid:", depth_valid)
             print("args.no_depth:", args.no_depth)
+            print("head_mode:", args.head_mode)
+            print("renderer_backend:", args.renderer_backend)
 
-
-        device_type = "cuda" if torch.cuda.is_available() else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=args.amp):
+            # Model predicts either:
+            # - grid outputs (for image proxy), or
+            # - points outputs (for real 3DGS backend)
             gauss = model(z, Ks, Rs, ts)
 
             loss_total = 0.0
             logs = None
+
             for b in range(B):
                 for v in range(V):
                     for t in range(L):
+                        gauss_bvt = {k: gauss[k][b, v, t] for k in gauss}
+
                         rgb_pred, depth_pred = renderer.render(
-                            {k: gauss[k][b, v, t] for k in gauss},
+                            gauss_bvt,
                             Ks[b, v, t],
                             Rs[b, v, t],
                             ts[b, v, t],
                             H,
                             W,
                         )
+
+                        # Depth usage:
+                        # - only if dataset depth valid
+                        # - only if user didn't disable depth
+                        # - only if depth_pred exists (should for image and real 3DGS)
+                        use_depth = depth_valid and (not args.no_depth) and (depth_pred is not None)
+
+                        # teacher_depth slice (shape [1,H,W] ideally)
+                        td = teacher_depth[b, v, t] if use_depth else None
+
                         loss, logs = compute_losses(
                             rgb_pred,
                             teacher_rgb[b, v, t],
@@ -139,9 +168,10 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
                             teacher_depth[b, v, t] if depth_valid else None,
                             gauss["opacity"][b, v, t],
                             use_lpips=args.use_lpips,
-                            # use_depth=depth_valid and (not args.no_depth),
-                            use_depth=True,
+                            use_depth=depth_valid and not args.no_depth,
+                            use_reg=False
                         )
+
                         loss_total = loss_total + loss
 
             loss_total = loss_total / max(1, B * V * L)
@@ -167,28 +197,22 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
         running_steps += 1
 
         # Save best checkpoint on improvement
-        if args.save_best and loss_total.item() < state.best_loss:
+        if args.save_best and (loss_total.item() < state.best_loss):
             state.best_loss = float(loss_total.item())
-            save_ckpt(
-                os.path.join(args.out_dir, "ckpt_best.pt"),
-                model,
-                optim,
-                scaler,
-                state,
-            )
+            save_ckpt(os.path.join(args.out_dir, "ckpt_best.pt"), model, optim, scaler, state)
 
-        if state.step % args.ckpt_every == 0 and state.step > 0:
-            save_ckpt(
-                os.path.join(args.out_dir, f"ckpt_step_{state.step}.pt"),
-                model,
-                optim,
-                scaler,
-                state,
-            )
+        # Periodic checkpoint
+        if args.ckpt_every > 0 and state.step % args.ckpt_every == 0 and state.step > 0:
+            save_ckpt(os.path.join(args.out_dir, f"ckpt_step_{state.step}.pt"), model, optim, scaler, state)
 
         state.step += 1
+
     return running_loss / max(1, running_steps)
 
+
+# -------------------------
+# Args
+# -------------------------
 
 def parse_args():
     p = argparse.ArgumentParser("MiniLyra training")
@@ -220,25 +244,44 @@ def parse_args():
     p.add_argument("--e-ch", type=int, default=32)
     p.add_argument("--hidden", type=int, default=256)
 
+    # NEW: head mode
+    p.add_argument("--head-mode", choices=["grid", "points"], default="grid",
+                   help="grid=image-proxy head, points=true 3D gaussian head")
+    p.add_argument("--num-points", type=int, default=0,
+                   help="Only for points head. 0 means use h*w (one per latent pixel).")
+
     # renderer
     p.add_argument(
         "--renderer-backend",
-        default="image",
-        help="Backend identifier ('image' proxy, 'dummy' for debug, or real backend)",
+        default="",
+        help="image (proxy), dummy (debug), or real backend id (e.g., gsplat)",
     )
+
     p.add_argument("--data-format", default="auto", choices=["auto", "teacher", "demo"])
     p.add_argument("--no-depth", action="store_true")
-    p.add_argument("--lpips", dest="use_lpips", action="store_true", default=True)
+
+    # FIXED: lpips flag should default False unless provided
+    p.add_argument("--lpips", dest="use_lpips", action="store_true", default=False)
 
     return p.parse_args()
 
+
+# -------------------------
+# Main
+# -------------------------
 
 def main():
     args = parse_args()
     seed_all(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Auto choose a renderer backend if user didn't pass one
+    if args.renderer_backend == "":
+        args.renderer_backend = "image" if args.head_mode == "grid" else "gsplat"
+
+    # Resolve data root / format
     if args.data_format == "auto":
         if os.path.isdir(os.path.join(args.data_root, "diffusion_output")):
             data_root = os.path.join(args.data_root, "diffusion_output", "0")
@@ -252,6 +295,7 @@ def main():
     else:
         data_root = args.data_root
 
+    # Dataset
     if args.data_format == "demo":
         ds = LyraDiffusionOutputDataset(
             root=data_root,
@@ -264,15 +308,16 @@ def main():
         )
     else:
         ds = LyraTeacherSubset(
-        root=data_root,
-        split=args.split,
-        V=args.views,
-        L=args.frames if args.frames > 0 else 1,
-        H=args.height if args.height > 0 else 176,
-        W=args.width if args.width > 0 else 320,
-        load_latents=True,
-    )
-    # Infer z_ch from the dataset if possible
+            root=data_root,
+            split=args.split,
+            V=args.views,
+            L=args.frames if args.frames > 0 else 1,
+            H=args.height if args.height > 0 else 176,
+            W=args.width if args.width > 0 else 320,
+            load_latents=True,
+        )
+
+    # Infer z_ch from dataset if possible
     try:
         sample = ds[0]
         if sample.get("z") is not None:
@@ -291,13 +336,22 @@ def main():
         pin_memory=True,
     )
 
-    model = MiniLyraStudent(z_ch=args.z_ch, e_ch=args.e_ch, hidden=args.hidden)
-    model = model.to(device)
+    # Model
+    num_points = None if args.num_points <= 0 else int(args.num_points)
+    model = MiniLyraStudent(
+        z_ch=args.z_ch,
+        e_ch=args.e_ch,
+        hidden=args.hidden,
+        head_mode=args.head_mode,
+        num_points=num_points,
+        # for points head, plucker in latent space is much faster:
+        plucker_hw_mode="latent" if args.head_mode == "points" else "rgb",
+    ).to(device)
 
+    # Renderer
     renderer = build_renderer(args.renderer_backend)
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    device_type = "cuda" if torch.cuda.is_available() else "cpu"
     scaler = torch.amp.GradScaler(device_type, enabled=args.amp)
 
     state = TrainState(epoch=0, step=0, best_loss=float("inf"))
