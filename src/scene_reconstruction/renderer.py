@@ -35,78 +35,95 @@ class GaussianRenderer:
 
     def render(self, gauss, K, R, t, H, W):
         """
-        gauss: dict with keys
-            xyz      [N,3]
-            scales   [N,3]
-            rot      [N,4]
-            opacity  [N] or [N,1]
-            rgb      [N,3]
-
-        K: [3,3]
-        R: [3,3]
-        t: [3]
+        Robust gsplat renderer with flexible key mapping.
         """
+        # -------------------------
+        # Safety check
+        # -------------------------
+        if not isinstance(gauss, dict):
+            raise TypeError(f"Expected gauss dict, got {type(gauss)}")
 
-        device = gauss["xyz"].device
-        dtype = gauss["xyz"].dtype
+        def pick_key(d, candidates):
+            for k in candidates:
+                if k in d:
+                    return k
+            return None
 
-        # ---------------------------
-        # Ensure camera batch dimension
-        # ---------------------------
+        # -------------------------
+        # Map possible key names
+        # -------------------------
+        k_means = pick_key(gauss, ["xyz", "means3D", "means", "pos", "positions"])
+        k_scales = pick_key(gauss, ["scales", "scale"])
+        k_rots = pick_key(gauss, ["rot", "rotation", "rotations", "quat", "quats"])
+        k_cols = pick_key(gauss, ["rgb", "color", "colors"])
+        k_opac = pick_key(gauss, ["opacity", "opacities", "alpha"])
 
+        if None in [k_means, k_scales, k_rots, k_cols, k_opac]:
+            raise KeyError(
+                f"Renderer could not map gaussian keys.\n"
+                f"Available keys: {list(gauss.keys())}"
+            )
+
+        means3D = gauss[k_means]
+        scales = gauss[k_scales]
+        rotations = gauss[k_rots]
+        colors = gauss[k_cols]
+        opacity = gauss[k_opac]
+
+        device = means3D.device
+        dtype = means3D.dtype
+
+        # -------------------------
+        # Camera dims fix
+        # -------------------------
         if K.dim() == 2:
-            K = K.unsqueeze(0)  # [1,3,3]
-
+            K = K.unsqueeze(0)
         if R.dim() == 2:
-            R = R.unsqueeze(0)  # [1,3,3]
-
+            R = R.unsqueeze(0)
         if t.dim() == 1:
-            t = t.unsqueeze(0)  # [1,3]
+            t = t.unsqueeze(0)
 
         K = K.to(device=device, dtype=dtype)
         R = R.to(device=device, dtype=dtype)
         t = t.to(device=device, dtype=dtype)
 
-        # ---------------------------
-        # Build world->camera view matrix
-        # ---------------------------
-
-        viewmats = torch.eye(4, device=device, dtype=dtype).unsqueeze(0)  # [1,4,4]
+        viewmats = torch.eye(4, device=device, dtype=dtype).unsqueeze(0)
         viewmats[:, :3, :3] = R
         viewmats[:, :3, 3] = t
 
-        # ---------------------------
-        # Prepare Gaussian parameters
-        # ---------------------------
+        # -------------------------
+        # Shape sanitation
+        # -------------------------
+        means3D = means3D.reshape(-1, 3)
 
-        means3D = gauss["xyz"]                  # [N,3]
-        scales = gauss["scales"]                # [N,3]
-        rotations = gauss["rot"]                # [N,4] quaternion
-        opacity = gauss["opacity"].view(-1)     # [N]
-        colors = gauss["rgb"]                   # [N,3]
+        if scales.dim() == 1:
+            scales = scales[:, None].repeat(1, 3)
+        elif scales.shape[-1] == 1:
+            scales = scales.repeat(1, 3)
+        scales = scales.reshape(-1, 3)
 
-        # ---------------------------
-        # Call gsplat rasterizer
-        # ---------------------------
+        rotations = rotations.reshape(-1, 4)
 
+        colors = colors.reshape(-1, 3)
+        opacity = opacity.view(-1)
+
+        # -------------------------
+        # Rasterize
+        # -------------------------
         render_pkg = gsplat.rasterization(
             means3D=means3D,
             scales=scales,
             rotations=rotations,
             opacities=opacity,
             colors=colors,
-            viewmats=viewmats,   # [C,4,4]
-            Ks=K,                # [C,3,3]
+            viewmats=viewmats,
+            Ks=K,
             width=W,
             height=H,
             packed=False,
         )
 
-        # render_pkg contains:
-        #   "render" -> [C,H,W,3]
-        #   "depth"  -> [C,H,W]
-
-        rgb = render_pkg["render"][0].permute(2, 0, 1)   # [3,H,W]
-        depth = render_pkg["depth"][0].unsqueeze(0)      # [1,H,W]
+        rgb = render_pkg["render"][0].permute(2, 0, 1)  # [3,H,W]
+        depth = render_pkg["depth"][0].unsqueeze(0)     # [1,H,W]
 
         return rgb, depth
