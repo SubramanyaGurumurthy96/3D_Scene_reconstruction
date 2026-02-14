@@ -5,6 +5,8 @@ from torch.utils.data import Dataset
 import cv2
 import OpenEXR
 import Imath
+import zipfile
+import io
 
 
 def _resize_intrinsics(K, src_hw, dst_hw):
@@ -236,57 +238,64 @@ class LyraDiffusionOutputDataset(Dataset):
 
         K = torch.from_numpy(np.stack(Ks, axis=0)).float().unsqueeze(0)
 
-        # ----- Depth (OpenEXR) -----
+
+        # ----- Depth (read EXR from ZIP) -----
         depth_valid = False
         depth = None
 
         if self.load_depth:
-            depth_dir = os.path.join(base_dir, "depth")
+            zip_path = os.path.join(base_dir, "depth", f"{sample_id}.zip")
 
-            if os.path.isdir(depth_dir):
+            if os.path.exists(zip_path):
                 depth_list = []
 
-                for frame_idx in range(self.L or rgb.shape[1]):
-                    exr_path = os.path.join(depth_dir, f"{frame_idx:05d}.exr")
+                try:
+                    with zipfile.ZipFile(zip_path, 'r') as z:
 
-                    if not os.path.exists(exr_path):
-                        break
+                        for frame_idx in range(self.L or rgb.shape[1]):
+                            exr_name = f"{frame_idx:05d}.exr"
 
-                    try:
-                        exr = OpenEXR.InputFile(exr_path)
-                        header = exr.header()
+                            if exr_name not in z.namelist():
+                                break
 
-                        dw = header["dataWindow"]
-                        width = dw.max.x - dw.min.x + 1
-                        height = dw.max.y - dw.min.y + 1
+                            exr_bytes = z.read(exr_name)
 
-                        FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
-                        depth_str = exr.channel("Z", FLOAT)
-
-                        depth_np = np.frombuffer(depth_str, dtype=np.float32)
-                        depth_np = depth_np.reshape((height, width))
-
-                        if (height, width) != (tgt_h, tgt_w):
-                            depth_np = cv2.resize(
-                                depth_np,
-                                (tgt_w, tgt_h),
-                                interpolation=cv2.INTER_NEAREST,
+                            exr_file = OpenEXR.InputFile(
+                                io.BytesIO(exr_bytes)
                             )
 
-                        depth_list.append(depth_np)
+                            header = exr_file.header()
+                            dw = header["dataWindow"]
+                            width = dw.max.x - dw.min.x + 1
+                            height = dw.max.y - dw.min.y + 1
 
-                    except Exception as e:
-                        print("[WARN] Depth read failed:", e)
-                        break
+                            FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+                            depth_str = exr_file.channel("Z", FLOAT)
 
-                if len(depth_list) > 0:
-                    depth_np = np.stack(depth_list, axis=0)
-                    depth = torch.from_numpy(depth_np).float()
-                    depth = depth.unsqueeze(1).unsqueeze(0)
-                    depth_valid = True
+                            depth_np = np.frombuffer(depth_str, dtype=np.float32)
+                            depth_np = depth_np.reshape((height, width))
+
+                            if (height, width) != (tgt_h, tgt_w):
+                                depth_np = cv2.resize(
+                                    depth_np,
+                                    (tgt_w, tgt_h),
+                                    interpolation=cv2.INTER_NEAREST,
+                                )
+
+                            depth_list.append(depth_np)
+
+                    if len(depth_list) > 0:
+                        depth_np = np.stack(depth_list, axis=0)
+                        depth = torch.from_numpy(depth_np).float()
+                        depth = depth.unsqueeze(1).unsqueeze(0)
+                        depth_valid = True
+
+                except Exception as e:
+                    print("[WARN] Zip depth read failed:", e)
 
         if depth is None:
             depth = torch.zeros((1, rgb.shape[1], 1, tgt_h, tgt_w), dtype=torch.float32)
+
 
         # ----- Latent Shape Fix -----
         if z is not None:
