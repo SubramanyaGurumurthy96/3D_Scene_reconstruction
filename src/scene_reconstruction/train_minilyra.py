@@ -101,6 +101,7 @@ def train_one_epoch(model, loader, renderer, optim, scaler, device, args, state:
     running_steps = 0
 
     device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
     for batch in loader:
         z = batch["z"]

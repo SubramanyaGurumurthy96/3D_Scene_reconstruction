@@ -289,9 +289,17 @@ class LyraDiffusionOutputDataset(Dataset):
                             depth_list.append(depth_np)
 
                     if len(depth_list) > 0:
-                        depth_np = np.stack(depth_list, axis=0)  # [L,H,W]
+                        depth_np = np.stack(depth_list, axis=0)
                         depth = torch.from_numpy(depth_np).float()
-                        depth = depth.unsqueeze(1).unsqueeze(0)  # [1,L,1,H,W]
+
+                        # --------------------------------
+                        # Normalize depth per-sample
+                        # --------------------------------
+                        max_val = depth.max()
+                        if max_val > 0:
+                            depth = depth / (max_val + 1e-6)
+
+                        depth = depth.unsqueeze(1).unsqueeze(0)
                         depth_valid = True
 
                 except Exception as e:
