@@ -155,15 +155,23 @@ class GaussianRenderer:
             else:
                 raise RuntimeError(f"Unexpected rgb_out shape: {tuple(rgb_out.shape)}")
     
-            # depth_out typically [C,H,W]
             if depth_out is None:
                 depth = None
             else:
-                if depth_out.dim() == 3:
-                    depth = depth_out[0].unsqueeze(0).contiguous()  # [1,H,W]
+                # Case 1: [C,H,W,1]
+                if depth_out.dim() == 4 and depth_out.shape[-1] == 1:
+                    depth = depth_out[0].permute(2, 0, 1).contiguous()  # [1,H,W]
+
+                # Case 2: [C,H,W]
+                elif depth_out.dim() == 3:
+                    depth = depth_out[0].unsqueeze(0).contiguous()      # [1,H,W]
+
+                # Case 3: [H,W]
                 elif depth_out.dim() == 2:
                     depth = depth_out.unsqueeze(0).contiguous()
+
                 else:
                     raise RuntimeError(f"Unexpected depth_out shape: {tuple(depth_out.shape)}")
+
     
         return rgb, depth
